@@ -4,81 +4,8 @@ import numpy as np
 import pyrealsense2 as rs
 import mediapipe as mp
 from collections import deque
+from queue import Queue, Empty
 import socket, threading, json, time, os
-
-# ============== TCP============
-TCP_HOST = "127.0.0.1"
-TCP_PORT = 5050
-
-class TcpSink:
-    def __init__(self, host=TCP_HOST, port=TCP_PORT):
-        self.host = host
-        self.port = port
-        self.srv = None
-        self.cli = None
-        self.lock = threading.Lock()
-        self.running = False
-
-    def start(self):
-        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind((self.host, self.port))
-        self.srv.listen(1)
-        self.srv.settimeout(0.2)
-        self.running = True
-        print(f"[TCP] Listening on {self.host}:{self.port}")
-
-    def _accept_once(self):
-        try:
-            conn, addr = self.srv.accept()
-            conn.settimeout(0.0)
-            with self.lock:
-                if self.cli:
-                    try: self.cli.close()
-                    except: pass
-                self.cli = conn
-            print(f"[TCP] Client connected: {addr}")
-        except socket.timeout:
-            pass
-        except Exception as e:
-            print(f"[TCP] accept() error: {e}")
-
-    def send_json(self, obj: dict):
-        payload = (json.dumps(obj) + "\n").encode("utf-8")
-        with self.lock:
-            if not self.cli:
-                return False
-            try:
-                self.cli.sendall(payload)
-                return True
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                try: self.cli.close()
-                except: pass
-                self.cli = None
-                print("[TCP] Client disconnected")
-                return False
-
-    def step(self):
-        if self.running and self.cli is None:
-            self._accept_once()
-
-    def stop(self):
-        self.running = False
-        with self.lock:
-            try:
-                if self.cli:
-                    self.cli.close()
-            except: pass
-            try:
-                if self.srv:
-                    self.srv.close()
-            except: pass
-        self.cli = None
-        self.srv = None
-        print("[TCP] Stopped")
-
-tcp = TcpSink()
-tcp.start()
 
 # ============== DETECTOR (напрямок + кроки) ==============
 W, H, FPS = 640, 480, 30
@@ -121,6 +48,107 @@ if os.path.exists(CAL_FILE):
     except Exception as e:
         print("[CAL] Failed to load calibration:", e)
 
+# =============== TCP DISPATCHER ===============
+TCP_HOST = "127.0.0.1"
+TCP_PORT = 5050
+EVENT_QUEUE_SIZE = 256
+
+class TcpDispatcher(threading.Thread):
+    def __init__(self, host=TCP_HOST, port=TCP_PORT, queue_size=EVENT_QUEUE_SIZE):
+        super().__init__(daemon=True)
+        self.host = host
+        self.port = port
+        self.queue = Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.server = None
+        self.clients = []
+        self.lock = threading.Lock()
+
+    def run(self):
+        try:
+            self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server.bind((self.host, self.port))
+            self.server.listen(4)
+            self.server.settimeout(0.2)
+            print(f"[TCP] Listening on {self.host}:{self.port}")
+        except Exception as e:
+            print(f"[TCP] Failed to start: {e}")
+            return
+
+        while not self.stop_event.is_set():
+            self._accept_once()
+            self._drain_queue()
+
+        self._drain_queue()
+        self._close_all()
+
+    def _accept_once(self):
+        if not self.server:
+            return
+        try:
+            conn, addr = self.server.accept()
+            conn.setblocking(False)
+            with self.lock:
+                self.clients.append(conn)
+            print(f"[TCP] Client connected: {addr}")
+        except socket.timeout:
+            pass
+        except OSError:
+            pass
+        except Exception as e:
+            print(f"[TCP] accept() error: {e}")
+
+    def _drain_queue(self):
+        while True:
+            try:
+                obj = self.queue.get_nowait()
+            except Empty:
+                break
+            data = (json.dumps(obj) + "\n").encode("utf-8")
+            to_remove = []
+            with self.lock:
+                for cli in self.clients:
+                    try:
+                        cli.sendall(data)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        to_remove.append(cli)
+                for cli in to_remove:
+                    try: cli.close()
+                    except: pass
+                    self.clients.remove(cli)
+
+    def send(self, obj: dict):
+        if self.stop_event.is_set():
+            return False
+        try:
+            self.queue.put_nowait(obj)
+            return True
+        except:
+            return False
+
+    def stop(self):
+        self.stop_event.set()
+        if self.server:
+            try: self.server.close()
+            except: pass
+        self.join(timeout=1.0)
+        self._close_all()
+
+    def _close_all(self):
+        with self.lock:
+            for cli in self.clients:
+                try: cli.close()
+                except: pass
+            self.clients.clear()
+        if self.server:
+            try: self.server.close()
+            except: pass
+        self.server = None
+
+tcp_dispatcher = TcpDispatcher()
+tcp_dispatcher.start()
+
 pipeline = rs.pipeline()
 cfg = rs.config()
 cfg.enable_stream(rs.stream.depth, W, H, rs.format.z16, FPS)
@@ -150,12 +178,12 @@ def send_event(event: str, **payload):
     msg = {"type": "event", "value": event, "ts": time.time()}
     if payload:
         msg.update(payload)
-    ok = tcp.send_json(msg)
+    ok = tcp_dispatcher.send(msg)
     log = f"[TCP] => {event} {payload if payload else ''}"
     if ok:
         print(log)
     else:
-        print(log + " (no client)")
+        print(log + " (queue/full or no client)")
 
 try:
     while True:
@@ -167,7 +195,6 @@ try:
             continue
 
         color_img = np.asanyarray(color.get_data())
-        depth_img  = np.asanyarray(depth.get_data())
 
         # MediaPipe
         rgb_for_mp = cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB)
@@ -302,13 +329,12 @@ try:
                 )
 
         cv2.imshow("Showroom | Direction (color)", color_img)
-        tcp.step()
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
 finally:
-    try: tcp.stop()
+    try: tcp_dispatcher.stop()
     except: pass
     pipeline.stop()
     cv2.destroyAllWindows()
