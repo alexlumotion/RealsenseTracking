@@ -65,10 +65,6 @@ COOLDOWN_FRAMES = 18
 DRAW_TRAIL = True
 TRAIL_LEN = 25
 
-SHIFT_DISPLACEMENT = 0.18    # мін. зсув по X, щоб вважати крок
-SHIFT_STILL_SPEED = 0.0025   # швидкість, нижче якої вважаємо, що зупинився
-SHIFT_STILL_FRAMES = 6       # скільки кадрів поспіль підтвердити “стоїть”
-
 pipeline = rs.pipeline()
 cfg = rs.config()
 cfg.enable_stream(rs.stream.depth, W, H, rs.format.z16, FPS)
@@ -151,9 +147,6 @@ try:
 
             xs.append(ema_x)
 
-            if baseline_x is None:
-                baseline_x = ema_x
-
             if DRAW_TRAIL and y_norm is not None:
                 trail.append((int(ema_x * W), int(y_norm * H)))
                 for i in range(1, len(trail)):
@@ -173,63 +166,21 @@ try:
 
                     if moved_right:
                         emit("MOVE_RIGHT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
-                        shift_target = "RIGHT"
-                        shift_confirm_frames = 0
                         cooldown = COOLDOWN_FRAMES
                         xs.clear()
                     elif moved_left:
                         emit("MOVE_LEFT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
-                        shift_target = "LEFT"
-                        shift_confirm_frames = 0
                         cooldown = COOLDOWN_FRAMES
                         xs.clear()
 
-            # ----- STEP DETECTION -----
-            if baseline_x is not None and ema_x is not None:
-                displacement = ema_x - baseline_x
-                still = abs(ema_v) <= SHIFT_STILL_SPEED
-
-                if shift_target == "RIGHT":
-                    if displacement >= SHIFT_DISPLACEMENT:
-                        shift_confirm_frames = shift_confirm_frames + 1 if still else 0
-                        if shift_confirm_frames >= SHIFT_STILL_FRAMES:
-                            emit("SHIFT_RIGHT", {"x": round(ema_x, 3), "dx": round(displacement, 3)})
-                            baseline_x = ema_x
-                            shift_target = None
-                            shift_confirm_frames = 0
-                    elif displacement < 0:
-                        shift_target = None
-                        shift_confirm_frames = 0
-                elif shift_target == "LEFT":
-                    if displacement <= -SHIFT_DISPLACEMENT:
-                        shift_confirm_frames = shift_confirm_frames + 1 if still else 0
-                        if shift_confirm_frames >= SHIFT_STILL_FRAMES:
-                            emit("SHIFT_LEFT", {"x": round(ema_x, 3), "dx": round(displacement, 3)})
-                            baseline_x = ema_x
-                            shift_target = None
-                            shift_confirm_frames = 0
-                    elif displacement > 0:
-                        shift_target = None
-                        shift_confirm_frames = 0
-                else:
-                    # невелике дрейфування — оновлюємо базову точку повільно
-                    if still and abs(displacement) < (SHIFT_DISPLACEMENT * 0.3):
-                        baseline_x = 0.95 * baseline_x + 0.05 * ema_x
-
             cv2.putText(color_img, f"x={ema_x:.3f} v={ema_v:+.3f}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2, cv2.LINE_AA)
-            if baseline_x is not None:
-                cv2.putText(color_img, f"base={baseline_x:.3f} shift={shift_target or '-'}",
-                            (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 50), 1, cv2.LINE_AA)
         else:
             no_person_ctr += 1
             if no_person_ctr == ABSENCE_FRAMES:
                 emit("NO_PERSON")
                 ema_x = None
                 ema_v = 0.0
-                baseline_x = None
-                shift_target = None
-                shift_confirm_frames = 0
                 xs.clear()
                 trail.clear()
 
