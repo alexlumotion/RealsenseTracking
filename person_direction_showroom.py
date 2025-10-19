@@ -4,7 +4,7 @@ import numpy as np
 import pyrealsense2 as rs
 import mediapipe as mp
 from collections import deque
-import socket, threading, json, time
+import socket, threading, json, time, os
 
 # ============== TCP SERVER ==============
 SERVER_HOST = "0.0.0.0"
@@ -65,6 +65,31 @@ COOLDOWN_FRAMES = 18
 DRAW_TRAIL = True
 TRAIL_LEN = 25
 
+# =============== T-POSE SETTINGS ===============
+TPOSE_EXTEND_THR = 0.25
+TPOSE_Y_THR      = 0.15
+
+CAL_FILE         = "tpose_calibration.json"
+EXT_TOL          = 0.08
+Y_TOL            = 0.06
+MIN_TPOSE_FRAMES = 4
+
+calibrated = False
+EXTEND_REF = None
+DWL_REF    = None
+DWR_REF    = None
+if os.path.exists(CAL_FILE):
+    try:
+        with open(CAL_FILE, "r") as f:
+            data = json.load(f)
+        EXTEND_REF = float(data["extend_ref"])
+        DWL_REF    = float(data["dwL_ref"])
+        DWR_REF    = float(data["dwR_ref"])
+        calibrated = True
+        print(f"[CAL] Loaded: |ext|={abs(EXTEND_REF):.3f} dwL={DWL_REF:+.3f} dwR={DWR_REF:+.3f}")
+    except Exception as e:
+        print("[CAL] Failed to load calibration:", e)
+
 pipeline = rs.pipeline()
 cfg = rs.config()
 cfg.enable_stream(rs.stream.depth, W, H, rs.format.z16, FPS)
@@ -87,10 +112,8 @@ xs = deque(maxlen=WINDOW)
 cooldown = 0
 no_person_ctr = 0
 trail = deque(maxlen=TRAIL_LEN)
-
-baseline_x = None
-shift_target = None
-shift_confirm_frames = 0
+tpose_streak = 0
+last_tpose_state = None
 
 def emit(event: str, extra: dict | None = None):
     print(f"EVENT: {event} {extra if extra else ''}")
@@ -116,6 +139,8 @@ try:
         x_norm = None
         y_norm = None
         dist_m = 0.0
+        extend_val = 0.0
+        dwL = dwR = 0.0
 
         if res.pose_landmarks:
             lh = res.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_HIP]
@@ -132,6 +157,15 @@ try:
                 cv2.circle(color_img, (x_px, y_px), 6, (0, 255, 255), -1)
                 cv2.putText(color_img, f"{dist_m:.2f} m", (x_px+8, y_px-8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1, cv2.LINE_AA)
+
+            ls = res.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_SHOULDER]
+            rs_ = res.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+            lw = res.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_WRIST]
+            rw = res.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_WRIST]
+            shoulder_y = 0.5 * (ls.y + rs_.y)
+            dwL = lw.y - shoulder_y
+            dwR = rw.y - shoulder_y
+            extend_val = rw.x - lw.x
 
         if person_present:
             no_person_ctr = 0
@@ -186,6 +220,48 @@ try:
 
             cv2.putText(color_img, "NO PERSON",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
+
+        # ---------- T-POSE ----------
+        is_tpose_frame = False
+        if res.pose_landmarks:
+            if calibrated and EXTEND_REF is not None:
+                ext_ok = abs(abs(extend_val) - abs(EXTEND_REF)) <= EXT_TOL
+                y_ok   = (abs(dwL - DWL_REF) <= Y_TOL) and (abs(dwR - DWR_REF) <= Y_TOL)
+                is_tpose_frame = ext_ok and y_ok
+            else:
+                is_tpose_frame = (extend_val > TPOSE_EXTEND_THR and
+                                  abs(dwL) < TPOSE_Y_THR and abs(dwR) < TPOSE_Y_THR)
+
+        if is_tpose_frame:
+            tpose_streak += 1
+        else:
+            tpose_streak = max(0, tpose_streak - 1)
+        is_tpose = tpose_streak >= MIN_TPOSE_FRAMES
+
+        curr_state = "ON" if is_tpose else "OFF"
+        if curr_state != last_tpose_state:
+            emit("TPOSE_ON" if is_tpose else "TPOSE_OFF",
+                 {"extend": round(extend_val, 3), "dwL": round(dwL, 3), "dwR": round(dwR, 3)})
+            last_tpose_state = curr_state
+
+        if res.pose_landmarks:
+            label = "T-POSE ✅" if is_tpose else ("T-POSE …" if is_tpose_frame else "T-POSE ❌")
+            color = (0,255,0) if is_tpose else ((0,200,255) if is_tpose_frame else (0,0,255))
+            cv2.putText(color_img, label, (10, 56),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+            if calibrated and EXTEND_REF is not None:
+                cv2.putText(
+                    color_img,
+                    f"|ext|={abs(extend_val):.3f} ref={abs(EXTEND_REF):.3f}±{EXT_TOL:.2f} "
+                    f"dwL={dwL:+.3f}/{DWL_REF:+.3f} dwR={dwR:+.3f}/{DWR_REF:+.3f}",
+                    (10, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1, cv2.LINE_AA
+                )
+            else:
+                cv2.putText(
+                    color_img,
+                    f"ext>{TPOSE_EXTEND_THR:.2f} |dw|<{TPOSE_Y_THR:.2f}",
+                    (10, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1, cv2.LINE_AA
+                )
 
         cv2.imshow("Showroom | Direction (color)", color_img)
 
