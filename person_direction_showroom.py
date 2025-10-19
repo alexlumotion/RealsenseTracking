@@ -165,11 +165,11 @@ try:
                     moved_left  = (delta < -MIN_DELTA) and (speed < -MIN_SPEED)
 
                     if moved_right:
-                        emit("MOVE_RIGHT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
+                        emit("MOVE_LEFT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
                         cooldown = COOLDOWN_FRAMES
                         xs.clear()
                     elif moved_left:
-                        emit("MOVE_LEFT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
+                        emit("MOVE_RIGHT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
                         cooldown = COOLDOWN_FRAMES
                         xs.clear()
 
@@ -187,12 +187,7 @@ try:
             cv2.putText(color_img, "NO PERSON",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
 
-        depth_vis = cv2.applyColorMap(
-            cv2.convertScaleAbs(depth_img, alpha=0.03),
-            cv2.COLORMAP_JET
-        )
-        view = np.hstack([color_img, depth_vis])
-        cv2.imshow("Showroom | Direction + Steps (color | depth)", view)
+        cv2.imshow("Showroom | Direction (color)", color_img)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
