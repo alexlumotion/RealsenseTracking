@@ -6,48 +6,79 @@ import mediapipe as mp
 from collections import deque
 import socket, threading, json, time, os
 
-# ============== TCP SERVER ==============
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 5050
+# ============== TCP============
+TCP_HOST = "127.0.0.1"
+TCP_PORT = 5050
 
-clients = []
-clients_lock = threading.Lock()
+class TcpSink:
+    def __init__(self, host=TCP_HOST, port=TCP_PORT):
+        self.host = host
+        self.port = port
+        self.srv = None
+        self.cli = None
+        self.lock = threading.Lock()
+        self.running = False
 
-def accept_loop():
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((SERVER_HOST, SERVER_PORT))
-    srv.listen(8)
-    print(f"[TCP] Listening on {SERVER_HOST}:{SERVER_PORT}")
-    while True:
-        conn, addr = srv.accept()
-        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        with clients_lock:
-            clients.append(conn)
-        print(f"[TCP] Client connected: {addr}")
+    def start(self):
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind((self.host, self.port))
+        self.srv.listen(1)
+        self.srv.settimeout(0.2)
+        self.running = True
+        print(f"[TCP] Listening on {self.host}:{self.port}")
 
-def broadcast(event: str, payload: dict | None = None):
-    msg = {"type": "event", "value": event, "ts": time.time()}
-    if payload:
-        msg.update(payload)
-    data = (json.dumps(msg) + "\n").encode("utf-8")
+    def _accept_once(self):
+        try:
+            conn, addr = self.srv.accept()
+            conn.settimeout(0.0)
+            with self.lock:
+                if self.cli:
+                    try: self.cli.close()
+                    except: pass
+                self.cli = conn
+            print(f"[TCP] Client connected: {addr}")
+        except socket.timeout:
+            pass
+        except Exception as e:
+            print(f"[TCP] accept() error: {e}")
 
-    to_remove = []
-    with clients_lock:
-        for c in clients:
+    def send_json(self, obj: dict):
+        payload = (json.dumps(obj) + "\n").encode("utf-8")
+        with self.lock:
+            if not self.cli:
+                return False
             try:
-                c.sendall(data)
-            except Exception:
-                to_remove.append(c)
-        for c in to_remove:
-            try:
-                c.close()
-            except:
-                pass
-            clients.remove(c)
+                self.cli.sendall(payload)
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                try: self.cli.close()
+                except: pass
+                self.cli = None
+                print("[TCP] Client disconnected")
+                return False
 
-# окрема нитка для accept()
-threading.Thread(target=accept_loop, daemon=True).start()
+    def step(self):
+        if self.running and self.cli is None:
+            self._accept_once()
+
+    def stop(self):
+        self.running = False
+        with self.lock:
+            try:
+                if self.cli:
+                    self.cli.close()
+            except: pass
+            try:
+                if self.srv:
+                    self.srv.close()
+            except: pass
+        self.cli = None
+        self.srv = None
+        print("[TCP] Stopped")
+
+tcp = TcpSink()
+tcp.start()
 
 # ============== DETECTOR (напрямок + кроки) ==============
 W, H, FPS = 640, 480, 30
@@ -115,9 +146,16 @@ trail = deque(maxlen=TRAIL_LEN)
 tpose_streak = 0
 last_tpose_state = None
 
-def emit(event: str, extra: dict | None = None):
-    print(f"EVENT: {event} {extra if extra else ''}")
-    broadcast(event, extra)
+def send_event(event: str, **payload):
+    msg = {"type": "event", "value": event, "ts": time.time()}
+    if payload:
+        msg.update(payload)
+    ok = tcp.send_json(msg)
+    log = f"[TCP] => {event} {payload if payload else ''}"
+    if ok:
+        print(log)
+    else:
+        print(log + " (no client)")
 
 try:
     while True:
@@ -199,11 +237,11 @@ try:
                     moved_left  = (delta < -MIN_DELTA) and (speed < -MIN_SPEED)
 
                     if moved_right:
-                        emit("MOVE_LEFT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
+                        send_event("MOVE_LEFT", x=round(ema_x, 3), speed=round(speed, 3))
                         cooldown = COOLDOWN_FRAMES
                         xs.clear()
                     elif moved_left:
-                        emit("MOVE_RIGHT", {"x": round(ema_x, 3), "speed": round(speed, 3)})
+                        send_event("MOVE_RIGHT", x=round(ema_x, 3), speed=round(speed, 3))
                         cooldown = COOLDOWN_FRAMES
                         xs.clear()
 
@@ -212,7 +250,7 @@ try:
         else:
             no_person_ctr += 1
             if no_person_ctr == ABSENCE_FRAMES:
-                emit("NO_PERSON")
+                send_event("NO_PERSON")
                 ema_x = None
                 ema_v = 0.0
                 xs.clear()
@@ -240,8 +278,8 @@ try:
 
         curr_state = "ON" if is_tpose else "OFF"
         if curr_state != last_tpose_state:
-            emit("TPOSE_ON" if is_tpose else "TPOSE_OFF",
-                 {"extend": round(extend_val, 3), "dwL": round(dwL, 3), "dwR": round(dwR, 3)})
+            send_event("TPOSE_ON" if is_tpose else "TPOSE_OFF",
+                       extend=round(extend_val, 3), dwL=round(dwL, 3), dwR=round(dwR, 3))
             last_tpose_state = curr_state
 
         if res.pose_landmarks:
@@ -264,10 +302,13 @@ try:
                 )
 
         cv2.imshow("Showroom | Direction (color)", color_img)
+        tcp.step()
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
 finally:
+    try: tcp.stop()
+    except: pass
     pipeline.stop()
     cv2.destroyAllWindows()
