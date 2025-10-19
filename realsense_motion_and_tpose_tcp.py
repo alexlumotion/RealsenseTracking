@@ -177,6 +177,9 @@ frame_id = 0
 last_move_event = ""
 tpose_streak = 0
 last_tpose_state = None
+fps_counter = 0
+fps_timer = time.time()
+fps_value = 0.0
 
 def put(img, text, org, color=(0,255,255), scale=0.7, thick=2):
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
@@ -322,9 +325,16 @@ try:
             last_tpose_state = curr_tpose_state
 
         # ---------- OVERLAY ----------
+        fps_counter += 1
+        now = time.time()
+        if now - fps_timer >= 1.0:
+            fps_value = fps_counter / (now - fps_timer)
+            fps_counter = 0
+            fps_timer = now
+
         def overlay():
             put(color_img, f"x={0.0 if ema_x is None else ema_x:.3f}  "
-                           f"delta={delta:+.3f}  v={speed:+.3f}",
+                           f"delta={delta:+.3f}  v={speed:+.3f}  fps={fps_value:4.1f}",
                 (10, 28), (50,220,50), 0.7, 2)
             put(color_img, f"thr: d={MIN_DELTA:.3f} v={MIN_SPEED:.3f} win={WINDOW} cd={cooldown}",
                 (10, 52), (200,200,50), 0.6, 2)
