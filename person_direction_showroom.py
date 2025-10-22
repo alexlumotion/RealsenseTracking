@@ -13,12 +13,8 @@ MAX_VALID_DISTANCE_M = 3.0
 ABSENCE_FRAMES = 12
 
 EMA_ALPHA = 0.25
-VEL_ALPHA = 0.4
-VEL_DEADBAND = 0.003
-MIN_SPEED = 0.004
-WINDOW = 15
-MIN_DELTA = 0.06
-COOLDOWN_FRAMES = 18
+ZONE_LEFT_MAX = 0.33
+ZONE_RIGHT_MIN = 0.66
 
 DRAW_TRAIL = True
 TRAIL_LEN = 25
@@ -166,13 +162,11 @@ pose = mp_pose.Pose(
 )
 
 ema_x = None
-ema_v = 0.0
-xs = deque(maxlen=WINDOW)
-cooldown = 0
 no_person_ctr = 0
 trail = deque(maxlen=TRAIL_LEN)
 tpose_streak = 0
 last_tpose_state = None
+last_zone = None
 
 def send_event(event: str, **payload):
     msg = {"type": "event", "value": event, "ts": time.time()}
@@ -236,51 +230,41 @@ try:
             no_person_ctr = 0
             if ema_x is None:
                 ema_x = x_norm
-                ema_v = 0.0
-                xs.clear()
             else:
-                prev_x = ema_x
                 ema_x = EMA_ALPHA * x_norm + (1 - EMA_ALPHA) * ema_x
-                inst_v = ema_x - prev_x
-                ema_v = VEL_ALPHA * inst_v + (1 - VEL_ALPHA) * ema_v
-
-            xs.append(ema_x)
 
             if DRAW_TRAIL and y_norm is not None:
                 trail.append((int(ema_x * W), int(y_norm * H)))
                 for i in range(1, len(trail)):
                     cv2.line(color_img, trail[i-1], trail[i], (0, 255, 0), 2)
 
-            if cooldown > 0:
-                cooldown -= 1
-            else:
-                if len(xs) >= 2:
-                    delta = xs[-1] - xs[0]  # >0 вправо; <0 вліво
-                    speed = ema_v
-                    if abs(speed) < VEL_DEADBAND:
-                        speed = 0.0
+            zone = None
+            zone_event = None
+            if ema_x is not None:
+                if ema_x < ZONE_LEFT_MAX:
+                    zone = "LEFT"
+                    zone_event = "MOVE_LEFT_POSITION"
+                elif ema_x > ZONE_RIGHT_MIN:
+                    zone = "RIGHT"
+                    zone_event = "MOVE_RIGHT_POSITION"
+                else:
+                    zone = "CENTER"
+                    zone_event = "MOVE_CENTER_POSITION"
 
-                    moved_right = (delta > MIN_DELTA) and (speed > MIN_SPEED)
-                    moved_left  = (delta < -MIN_DELTA) and (speed < -MIN_SPEED)
+            if zone and zone != last_zone:
+                send_event(zone_event, x=round(ema_x, 3))
+                last_zone = zone
 
-                    if moved_right:
-                        send_event("MOVE_LEFT", x=round(ema_x, 3), speed=round(speed, 3))
-                        cooldown = COOLDOWN_FRAMES
-                        xs.clear()
-                    elif moved_left:
-                        send_event("MOVE_RIGHT", x=round(ema_x, 3), speed=round(speed, 3))
-                        cooldown = COOLDOWN_FRAMES
-                        xs.clear()
+            zone_label = zone if zone else "UNKNOWN"
 
-            cv2.putText(color_img, f"x={ema_x:.3f} v={ema_v:+.3f}",
+            cv2.putText(color_img, f"x={ema_x:.3f} zone={zone_label}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2, cv2.LINE_AA)
         else:
             no_person_ctr += 1
             if no_person_ctr == ABSENCE_FRAMES:
                 send_event("NO_PERSON")
                 ema_x = None
-                ema_v = 0.0
-                xs.clear()
+                last_zone = None
                 trail.clear()
 
             cv2.putText(color_img, "NO PERSON",
