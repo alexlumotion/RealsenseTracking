@@ -243,10 +243,10 @@ try:
             if ema_x is not None:
                 if ema_x < ZONE_LEFT_MAX:
                     zone = "LEFT"
-                    zone_event = "MOVE_LEFT_POSITION"
+                    zone_event = "MOVE_RIGHT_POSITION"
                 elif ema_x > ZONE_RIGHT_MIN:
                     zone = "RIGHT"
-                    zone_event = "MOVE_RIGHT_POSITION"
+                    zone_event = "MOVE_LEFT_POSITION"
                 else:
                     zone = "CENTER"
                     zone_event = "MOVE_CENTER_POSITION"
