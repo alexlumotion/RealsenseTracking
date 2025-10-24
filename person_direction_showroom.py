@@ -15,6 +15,14 @@ ABSENCE_FRAMES = 12
 EMA_ALPHA = 0.25
 ZONE_LEFT_MAX = 0.40
 ZONE_RIGHT_MIN = 0.60
+ENABLE_MOVE_EVENTS = True
+
+MOVE_VEL_ALPHA = 0.6
+MOVE_VEL_DEADBAND = 0.0015
+MOVE_MIN_SPEED = 0.006
+MOVE_WINDOW = 10
+MOVE_MIN_DELTA = 0.06
+MOVE_COOLDOWN_FRAMES = 10
 
 DRAW_TRAIL = True
 TRAIL_LEN = 25
@@ -162,11 +170,15 @@ pose = mp_pose.Pose(
 )
 
 ema_x = None
+ema_v = 0.0
+move_samples = deque(maxlen=MOVE_WINDOW)
+move_cooldown = 0
 no_person_ctr = 0
 trail = deque(maxlen=TRAIL_LEN)
 tpose_streak = 0
 last_tpose_state = None
 last_zone = None
+last_move_event = None
 
 def send_event(event: str, **payload):
     msg = {"type": "event", "value": event, "ts": time.time()}
@@ -230,17 +242,61 @@ try:
             dwR = rw.y - shoulder_y
             extend_val = rw.x - lw.x
 
+        delta = 0.0
+        speed = 0.0
+
         if person_present:
             no_person_ctr = 0
+            prev_ema_x = ema_x
             if ema_x is None:
                 ema_x = x_norm
+                if ENABLE_MOVE_EVENTS:
+                    ema_v = 0.0
+                    move_samples.clear()
             else:
                 ema_x = EMA_ALPHA * x_norm + (1 - EMA_ALPHA) * ema_x
+                if ENABLE_MOVE_EVENTS and prev_ema_x is not None:
+                    inst_v = ema_x - prev_ema_x
+                    ema_v = MOVE_VEL_ALPHA * inst_v + (1 - MOVE_VEL_ALPHA) * ema_v
 
             if DRAW_TRAIL and y_norm is not None:
                 trail.append((int(ema_x * W), int(y_norm * H)))
                 for i in range(1, len(trail)):
                     cv2.line(color_img, trail[i-1], trail[i], (0, 255, 0), 2)
+
+            if ENABLE_MOVE_EVENTS:
+                move_samples.append(ema_x)
+                if len(move_samples) >= 2:
+                    delta = move_samples[-1] - move_samples[0]
+                    speed = ema_v if abs(ema_v) >= MOVE_VEL_DEADBAND else 0.0
+                else:
+                    delta = 0.0
+                    speed = 0.0
+
+                if move_cooldown > 0:
+                    move_cooldown -= 1
+                else:
+                    moved_right = (delta > MOVE_MIN_DELTA) and (speed > MOVE_MIN_SPEED)
+                    moved_left  = (delta < -MOVE_MIN_DELTA) and (speed < -MOVE_MIN_SPEED)
+
+                    if moved_right:
+                        send_event("MOVE_RIGHT",
+                                   x=round(ema_x, 3),
+                                   speed=round(speed, 3),
+                                   delta=round(delta, 3),
+                                   dist=round(dist_m, 2))
+                        last_move_event = "MOVE_RIGHT"
+                        move_cooldown = MOVE_COOLDOWN_FRAMES
+                        move_samples.clear()
+                    elif moved_left:
+                        send_event("MOVE_LEFT",
+                                   x=round(ema_x, 3),
+                                   speed=round(speed, 3),
+                                   delta=round(delta, 3),
+                                   dist=round(dist_m, 2))
+                        last_move_event = "MOVE_LEFT"
+                        move_cooldown = MOVE_COOLDOWN_FRAMES
+                        move_samples.clear()
 
             zone = None
             zone_event = None
@@ -263,6 +319,14 @@ try:
 
             cv2.putText(color_img, f"x={ema_x:.3f} zone={zone_label}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2, cv2.LINE_AA)
+            if ENABLE_MOVE_EVENTS:
+                cv2.putText(color_img,
+                            f"Δ={delta:+.3f} v={speed:+.3f} cd={move_cooldown}",
+                            (10, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
+                if last_move_event:
+                    cv2.putText(color_img,
+                                f"move={last_move_event}",
+                                (10, 134), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
         else:
             no_person_ctr += 1
             if no_person_ctr == ABSENCE_FRAMES:
@@ -270,6 +334,11 @@ try:
                 ema_x = None
                 last_zone = None
                 trail.clear()
+                if ENABLE_MOVE_EVENTS:
+                    ema_v = 0.0
+                    move_samples.clear()
+                    move_cooldown = 0
+                    last_move_event = None
 
             cv2.putText(color_img, "NO PERSON",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
