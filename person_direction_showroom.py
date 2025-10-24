@@ -189,6 +189,10 @@ try:
             continue
 
         color_img = np.asanyarray(color.get_data())
+        left_boundary_px = int(ZONE_LEFT_MAX * W)
+        right_boundary_px = int(ZONE_RIGHT_MIN * W)
+        cv2.line(color_img, (left_boundary_px, 0), (left_boundary_px, H - 1), (255, 140, 0), 2)
+        cv2.line(color_img, (right_boundary_px, 0), (right_boundary_px, H - 1), (0, 140, 255), 2)
 
         # MediaPipe
         rgb_for_mp = cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB)
