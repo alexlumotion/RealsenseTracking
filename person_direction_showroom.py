@@ -16,6 +16,7 @@ EMA_ALPHA = 0.25
 ZONE_LEFT_MAX = 0.40
 ZONE_RIGHT_MIN = 0.60
 ENABLE_MOVE_EVENTS = True
+ENABLE_ZONE_EVENTS = True
 
 MOVE_VEL_ALPHA = 0.6
 MOVE_VEL_DEADBAND = 0.0015
@@ -311,14 +312,20 @@ try:
                     zone = "CENTER"
                     zone_event = "MOVE_CENTER_POSITION"
 
-            if zone and zone != last_zone:
-                send_event(zone_event, x=round(ema_x, 3))
+            if ENABLE_ZONE_EVENTS:
+                if zone and zone != last_zone:
+                    send_event(zone_event, x=round(ema_x, 3))
+                    last_zone = zone
+
+                zone_label = zone if zone else "UNKNOWN"
+
+                cv2.putText(color_img, f"x={ema_x:.3f} zone={zone_label}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2, cv2.LINE_AA)
+            else:
+                cv2.putText(color_img, f"x={ema_x:.3f}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2, cv2.LINE_AA)
                 last_zone = zone
 
-            zone_label = zone if zone else "UNKNOWN"
-
-            cv2.putText(color_img, f"x={ema_x:.3f} zone={zone_label}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2, cv2.LINE_AA)
             if ENABLE_MOVE_EVENTS:
                 cv2.putText(color_img,
                             f"Δ={delta:+.3f} v={speed:+.3f} cd={move_cooldown}",
