@@ -281,21 +281,21 @@ try:
                     moved_left  = (delta < -MOVE_MIN_DELTA) and (speed < -MOVE_MIN_SPEED)
 
                     if moved_right:
-                        send_event("MOVE_RIGHT",
-                                   x=round(ema_x, 3),
-                                   speed=round(speed, 3),
-                                   delta=round(delta, 3),
-                                   dist=round(dist_m, 2))
-                        last_move_event = "MOVE_RIGHT"
-                        move_cooldown = MOVE_COOLDOWN_FRAMES
-                        move_samples.clear()
-                    elif moved_left:
                         send_event("MOVE_LEFT",
                                    x=round(ema_x, 3),
                                    speed=round(speed, 3),
                                    delta=round(delta, 3),
                                    dist=round(dist_m, 2))
                         last_move_event = "MOVE_LEFT"
+                        move_cooldown = MOVE_COOLDOWN_FRAMES
+                        move_samples.clear()
+                    elif moved_left:
+                        send_event("MOVE_RIGHT",
+                                   x=round(ema_x, 3),
+                                   speed=round(speed, 3),
+                                   delta=round(delta, 3),
+                                   dist=round(dist_m, 2))
+                        last_move_event = "MOVE_RIGHT"
                         move_cooldown = MOVE_COOLDOWN_FRAMES
                         move_samples.clear()
 
